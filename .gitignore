@@ -1,0 +1,24 @@
+# Build results
+/target
+/artifacts
+/debug
+/schema
+
+# Cargo+Git helper file (https://github.com/rust-lang/cargo/blob/0.44.1/src/cargo/sources/git/utils.rs#L320-L327)
+.cargo-ok
+
+# Text file backups
+**/*.rs.bk
+
+# macOS
+.DS_Store
+
+# MSVC Windows builds of rustc generate these, which store debugging information
+*.pdb
+
+# IDEs
+*.iml
+.idea
+.vscode
+node_modules
+.env
