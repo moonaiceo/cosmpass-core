@@ -9,7 +9,6 @@
 
 # Text file backups
 **/*.rs.bk
-*.txt
 
 # macOS
 .DS_Store
