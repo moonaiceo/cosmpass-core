@@ -7,6 +7,8 @@ use cw20::{AllowanceResponse, Logo, MarketingInfoResponse};
 #[cw_serde]
 pub struct State {
     pub owner: Addr,
+    pub fee: u64,
+    pub fee_collector_address: String,
 }
 
 #[cw_serde]

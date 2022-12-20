@@ -70,6 +70,7 @@ pub struct PoolInfoResponse {
     pub id: u64,
     pub denom_1: String,
     pub denom_2: String,
+    pub white_list_denoms: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema, Debug, Default)]

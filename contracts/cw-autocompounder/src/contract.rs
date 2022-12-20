@@ -124,7 +124,11 @@ pub fn instantiate(
     };
 
     // store state info
-    let state = State { owner: _info.sender.clone(), };
+    let state = State { 
+        owner: _info.sender.clone(),
+        fee: msg.fee,
+        fee_collector_address: msg.fee_collector_address,
+    };
     STATE.save(deps.storage, &state)?;
 
     // store token info
@@ -215,6 +219,7 @@ pub fn execute(
         ExecuteMsg::Transfer { recipient, amount } => {
             execute_transfer(deps, env, info, recipient, amount)
         }
+
         ExecuteMsg::JoinPool { pool_id, amount, token_in_maxs } => execute_join_pool(env, pool_id, amount, token_in_maxs),
         
         ExecuteMsg::AddBond { owner, duration, coins} => execute_bond(owner, duration, coins),
@@ -226,6 +231,8 @@ pub fn execute(
         ExecuteMsg::ConvertRewards { } => execute_convert_rewards(env, deps, info),
 
         ExecuteMsg::WithdrawTokens {to_address, tokens} => execute_withdraw_tokens(to_address, tokens),
+
+        ExecuteMsg::UpdateWhiteList { coins } => execute_white_list_update(deps, info, coins),
 
         ExecuteMsg::Burn { amount } => execute_burn(deps, env, info, amount),
         ExecuteMsg::Send {
@@ -270,13 +277,16 @@ pub fn execute(
 
 
 pub fn execute_white_list_update(deps: DepsMut, info: MessageInfo, coins: Vec<String>) -> Result<Response, ContractError> {
-    STATE.update(deps.storage, |mut state| -> Result<_, ContractError> {
+    let state = STATE.load(deps.storage)?;
+    POOL_INFO.update(deps.storage, |mut pool_info| -> Result<_, ContractError> {
         if info.sender != state.owner {
             return Err(ContractError::Unauthorized {});
         }
-        Ok(state)
+        pool_info.white_list_denoms = coins;
+        
+        Ok(pool_info)
     })?;
-    Ok(Response::new().add_attribute("method", "reset"))
+    Ok(Response::new().add_attribute("method", "update white list"))
 }
 
 
@@ -289,8 +299,10 @@ pub fn execute_convert_rewards(
     if info.sender != state.owner {
         return Err(ContractError::Unauthorized {});
     }
+
     let _contract_address = env.contract.address;
     let balances = deps.querier.query_all_balances(&_contract_address);
+
     if let Err(_e) = balances {
         return Err(ContractError::NoValidAddress {});
     }
@@ -303,14 +315,13 @@ pub fn execute_convert_rewards(
 
     let info = POOL_INFO.load(deps.storage)?;
     let mut  messages = Vec::new();
+
     for coin in &balances_unwrapped{
-        if (&coin.denom != &info.denom_1) || (&coin.denom != &info.denom_2 ) { // & (white_list.contains(&coin.denom)
-            // TODO: Add function that will allow only owner to change list of white list 
-            // TODO: white list of tokens 
+        if (&coin.denom != &info.denom_1) || (&coin.denom != &info.denom_2 ) & info.white_list_denoms.contains(&coin.denom){ 
             // TODO: Swap this coin to one of denom
             let msg_: CosmosMsg = MsgSwapExactAmountIn {
                 sender: _contract_address.to_string(),
-                token_out_min_amount: "100".to_string(),
+                token_out_min_amount: "1".to_string(),
                 token_in: Some(Coin{
                     denom: coin.denom.to_string(),
                     amount: coin.amount.to_string()
@@ -324,6 +335,24 @@ pub fn execute_convert_rewards(
             
         }
     };
+    //TODO: Collect tokens
+
+    if state.fee != 0 {
+        messages.push(
+            BankMsg::Send {
+                to_address: state.fee_collector_address,
+                amount: Vec::from([
+                    cosmwasm_std::Coin{
+                        // TODO: Change denom
+                        denom: "uosmo".to_string(),
+                        // TODO: set calculated fee
+                        amount: Uint128::new(123213),
+                    }
+                ]),
+            }.into()
+        );
+    }
+
 
     Ok(Response::new().add_messages(messages,)
         .add_attribute("method", "Convert rewards")
@@ -334,7 +363,6 @@ pub fn execute_withdraw_tokens(
     tokens: Vec<cosmwasm_std::Coin>
 )  -> Result<Response, ContractError> {
 
-    // let msg_send:BankMsg = Send {to_address, amount: tokens}.into();
     let messages = tokens.into_iter().map(|coin| BankMsg::Send {
         to_address: to_address.to_string(),
         amount: Vec::from([coin]),
@@ -367,7 +395,7 @@ pub fn execute_unbond(
 
     Ok(Response::new()
         .add_message(msg_unbond,)
-        .add_attribute("method", "Undond all locks"))
+        .add_attribute("method", "Undond certain lock"))
 }
 
 pub fn execute_join_pool(
@@ -753,7 +781,7 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::Balance { address } => to_binary(&query_balance(deps, address)?),
         QueryMsg::TokenInfo {} => to_binary(&query_token_info(deps)?),
-        QueryMsg::PoolInfo {} => to_binary(&query_pool_info(deps, _env)?),
+        QueryMsg::PoolInfo {} => to_binary(&query_pool_info(deps)?),
         QueryMsg::Minter {} => to_binary(&query_minter(deps)?),
         QueryMsg::Allowance { owner, spender } => {
             to_binary(&query_allowance(deps, owner, spender)?)
@@ -800,18 +828,14 @@ pub fn query_token_info(deps: Deps) -> StdResult<TokenInfoResponse> {
     Ok(res)
 }
 
-pub fn query_pool_info(deps: Deps, env: Env) -> StdResult<QueryPoolResponse> {
-    let _contract_address = env.contract.address;
-    // let gamm_querier = GammQuerier::new(&deps.querier);
-    // let res = gamm_querier.estimate_swap_exact_amount_in(_contract_address.to_string(), 1, "100000uosmo".to_string(), Vec::from([SwapAmountInRoute{pool_id: 1, token_out_denom: "stake".to_string()}]))?;
-    
-    // let info = POOL_INFO.load(deps.storage)?;
-    // let res = PoolInfoResponse {
-    //     id: info.id,
-    //     denom_1: info.denom_1,
-    //     denom_2: info.denom_2,
-    // };
-    let res = GammQuerier::new(&deps.querier).pool(1)?;
+pub fn query_pool_info(deps: Deps) -> StdResult<PoolInfoResponse> {
+    let info = POOL_INFO.load(deps.storage)?;
+    let res = PoolInfoResponse {
+        id: info.id,
+        denom_1: info.denom_1,
+        denom_2: info.denom_2,
+        white_list_denoms: info.white_list_denoms,
+    };
     Ok(res)
 }
 
@@ -917,6 +941,8 @@ mod tests {
             denom_1: "uosmo".to_string(),
             denom_2: "".to_string(),
             white_list_denoms: Vec::from(["uosmo".to_string()]),
+            fee: 0,
+            fee_collector_address: addr.to_string(),
             initial_balances: vec![Cw20Coin {
                 address: addr.to_string(),
                 amount,
@@ -961,7 +987,9 @@ mod tests {
                 id: 1, 
                 denom_1: "uosmo".to_string(),
                 denom_2: "".to_string(),
+                fee_collector_address: "someCollectorAddresss".to_string(),
                 white_list_denoms: Vec::from(["uosmo".to_string()]),
+                fee: 0,
                 initial_balances: vec![Cw20Coin {
                     address: String::from("addr0000"),
                     amount,
@@ -1002,7 +1030,9 @@ mod tests {
                 white_list_denoms: Vec::from(["uosmo".to_string()]),
                 name: "Cash Token".to_string(),
                 symbol: "CASH".to_string(),
+                fee_collector_address: "someCollectorAddresss".to_string(),
                 decimals: 9,
+                fee: 0,
                 initial_balances: vec![Cw20Coin {
                     address: "addr0000".into(),
                     amount,
@@ -1053,6 +1083,9 @@ mod tests {
                 denom_1: "uosmo".to_string(),
                 denom_2: "".to_string(),
                 white_list_denoms: Vec::from(["uosmo".to_string()]),
+                fee_collector_address: "someCollectorAddresss".to_string(),
+
+                fee: 0,
                 decimals: 9,
                 initial_balances: vec![Cw20Coin {
                     address: String::from("addr0000"),
@@ -1086,6 +1119,8 @@ mod tests {
                     denom_1: "uosmo".to_string(),
                     denom_2: "".to_string(),
                     white_list_denoms: Vec::from(["uosmo".to_string()]),
+                    fee: 0,
+                    fee_collector_address: "someCollectorAddresss".to_string(),
                     decimals: 9,
                     initial_balances: vec![],
                     mint: None,
@@ -1129,6 +1164,8 @@ mod tests {
                     id: 1, 
                     denom_1: "uosmo".to_string(),
                     denom_2: "".to_string(),
+                    fee: 0,
+                    fee_collector_address: "someCollectorAddresss".to_string(),
                     white_list_denoms: Vec::from(["uosmo".to_string()]),
                     decimals: 9,
                     initial_balances: vec![],
@@ -1346,6 +1383,8 @@ mod tests {
             id: 1, 
             denom_1: "uosmo".to_string(),
             denom_2: "stake".to_string(),
+            fee: 0,
+            fee_collector_address: "someCollectorAddresss".to_string(),
             white_list_denoms: Vec::from(["uosmo".to_string()]),
             initial_balances: vec![
                 Cw20Coin {
@@ -1372,6 +1411,8 @@ mod tests {
             id: 1, 
             denom_1: "uosmo".to_string(),
             denom_2: "stake".to_string(),
+            fee: 0,
+            fee_collector_address: "someCollectorAddresss".to_string(),
             white_list_denoms: Vec::from(["uosmo".to_string()]),
             initial_balances: vec![
                 Cw20Coin {
@@ -1656,6 +1697,8 @@ mod tests {
                         id: 1, 
                         denom_1: "uosmo".to_string(),
                         denom_2: "stake".to_string(),
+                        fee: 0,
+                        fee_collector_address: "someCollectorAddresss".to_string(),
                         white_list_denoms: Vec::from(["uosmo".to_string()]),
                         initial_balances: vec![Cw20Coin {
                             address: "sender".to_string(),
@@ -1759,6 +1802,8 @@ mod tests {
                 id: 1, 
                 denom_1: "uosmo".to_string(),
                 denom_2: "stake".to_string(),
+                fee: 0,
+                fee_collector_address: "someCollectorAddresss".to_string(),
                 white_list_denoms: Vec::from(["uosmo".to_string()]),
                 initial_balances: vec![],
                 mint: None,
@@ -1817,6 +1862,8 @@ mod tests {
                 id: 1, 
                 denom_1: "uosmo".to_string(),
                 denom_2: "stake".to_string(),
+                fee: 0,
+                fee_collector_address: "someCollectorAddresss".to_string(),
                 white_list_denoms: Vec::from(["uosmo".to_string()]),
                 initial_balances: vec![],
                 mint: None,
@@ -1876,6 +1923,8 @@ mod tests {
                 id: 1, 
                 denom_1: "uosmo".to_string(),
                 denom_2: "stake".to_string(),
+                fee: 0,
+                fee_collector_address: "someCollectorAddresss".to_string(),
                 white_list_denoms: Vec::from(["uosmo".to_string()]),
                 marketing: Some(InstantiateMarketingInfo {
                     project: Some("Project".to_owned()),
@@ -1931,6 +1980,8 @@ mod tests {
                 id: 1, 
                 denom_1: "uosmo".to_string(),
                 denom_2: "stake".to_string(),
+                fee: 0,
+                fee_collector_address: "someCollectorAddresss".to_string(),
                 white_list_denoms: Vec::from(["uosmo".to_string()]),
                 initial_balances: vec![],
                 mint: None,
@@ -1988,6 +2039,8 @@ mod tests {
                 id: 1, 
                 denom_1: "uosmo".to_string(),
                 denom_2: "stake".to_string(),
+                fee: 0,
+                fee_collector_address: "someCollectorAddresss".to_string(),
                 white_list_denoms: Vec::from(["uosmo".to_string()]),
                 initial_balances: vec![],
                 mint: None,
@@ -2047,6 +2100,8 @@ mod tests {
                 id: 1, 
                 denom_1: "uosmo".to_string(),
                 denom_2: "stake".to_string(),
+                fee: 0,
+                fee_collector_address: "someCollectorAddresss".to_string(),
                 white_list_denoms: Vec::from(["uosmo".to_string()]),
                 marketing: Some(InstantiateMarketingInfo {
                     project: Some("Project".to_owned()),
@@ -2104,6 +2159,8 @@ mod tests {
                 id: 1, 
                 denom_1: "uosmo".to_string(),
                 denom_2: "stake".to_string(),
+                fee: 0,
+                fee_collector_address: "someCollectorAddresss".to_string(),
                 white_list_denoms: Vec::from(["uosmo".to_string()]),
                 marketing: Some(InstantiateMarketingInfo {
                     project: Some("Project".to_owned()),
@@ -2163,6 +2220,8 @@ mod tests {
                 id: 1, 
                 denom_1: "uosmo".to_string(),
                 denom_2: "stake".to_string(),
+                fee: 0,
+                fee_collector_address: "someCollectorAddresss".to_string(),
                 white_list_denoms: Vec::from(["uosmo".to_string()]),
                 initial_balances: vec![],
                 mint: None,
@@ -2222,6 +2281,8 @@ mod tests {
                 id: 1, 
                 denom_1: "uosmo".to_string(),
                 denom_2: "stake".to_string(),
+                fee: 0,
+                fee_collector_address: "someCollectorAddresss".to_string(),
                 white_list_denoms: Vec::from(["uosmo".to_string()]),
                 marketing: Some(InstantiateMarketingInfo {
                     project: Some("Project".to_owned()),
@@ -2273,6 +2334,8 @@ mod tests {
                 id: 1, 
                 denom_1: "uosmo".to_string(),
                 denom_2: "stake".to_string(),
+                fee: 0,
+                fee_collector_address: "someCollectorAddresss".to_string(),
                 white_list_denoms: Vec::from(["uosmo".to_string()]),
                 initial_balances: vec![],
                 mint: None,
@@ -2327,6 +2390,8 @@ mod tests {
                 id: 1, 
                 denom_1: "uosmo".to_string(),
                 denom_2: "stake".to_string(),
+                fee: 0,
+                fee_collector_address: "someCollectorAddresss".to_string(),
                 white_list_denoms: Vec::from(["uosmo".to_string()]),
                 initial_balances: vec![],
                 mint: None,
@@ -2382,6 +2447,8 @@ mod tests {
                 id: 1, 
                 denom_1: "uosmo".to_string(),
                 denom_2: "stake".to_string(),
+                fee: 0,
+                fee_collector_address: "someCollectorAddresss".to_string(),
                 white_list_denoms: Vec::from(["uosmo".to_string()]),
                 initial_balances: vec![],
                 mint: None,
@@ -2438,6 +2505,8 @@ mod tests {
                 id: 1, 
                 denom_1: "uosmo".to_string(),
                 denom_2: "stake".to_string(),
+                fee: 0,
+                fee_collector_address: "someCollectorAddresss".to_string(),
                 white_list_denoms: Vec::from(["uosmo".to_string()]),
                 marketing: Some(InstantiateMarketingInfo {
                     project: Some("Project".to_owned()),
@@ -2497,6 +2566,8 @@ mod tests {
                 id: 1, 
                 denom_1: "uosmo".to_string(),
                 denom_2: "stake".to_string(),
+                fee: 0,
+                fee_collector_address: "someCollectorAddresss".to_string(),
                 white_list_denoms: Vec::from(["uosmo".to_string()]),
                 initial_balances: vec![],
                 mint: None,
@@ -2553,6 +2624,8 @@ mod tests {
                 id: 1, 
                 denom_1: "uosmo".to_string(),
                 denom_2: "stake".to_string(),
+                fee: 0,
+                fee_collector_address: "someCollectorAddresss".to_string(),
                 white_list_denoms: Vec::from(["uosmo".to_string()]),
                 marketing: Some(InstantiateMarketingInfo {
                     project: Some("Project".to_owned()),

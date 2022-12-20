@@ -97,6 +97,8 @@ mod tests {
             id: 1, 
             denom_1: "uosmo".to_string(),
             denom_2: "stake".to_string(),
+            fee: 0,
+            fee_collector_address: addr.to_string(),
             white_list_denoms: Vec::from(["uosmo".to_string()]),
             decimals: 3,
             initial_balances: vec![Cw20Coin {

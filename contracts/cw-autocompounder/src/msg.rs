@@ -24,6 +24,8 @@ pub struct InstantiateMsg {
     pub denom_1: String,
     pub denom_2: String,
     pub white_list_denoms: Vec<String>,
+    pub fee: u64,
+    pub fee_collector_address: String,
     pub initial_balances: Vec<Cw20Coin>,
     pub mint: Option<MinterResponse>,
     pub marketing: Option<InstantiateMarketingInfo>,
