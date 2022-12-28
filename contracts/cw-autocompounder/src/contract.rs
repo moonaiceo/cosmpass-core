@@ -1,4 +1,6 @@
 
+use std::convert::TryInto;
+
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::Order::Ascending;
@@ -14,6 +16,8 @@ use cw20::{
 };
 use cw_utils::ensure_from_older_version;
 use osmosis_std::shim::Duration;
+use osmosis_std::types::cosmos::base::query::v1beta1::PageRequest;
+use prost::DecodeError;
 
 use crate::allowances::{
     execute_burn_from, execute_decrease_allowance, execute_increase_allowance, execute_send_from,
@@ -29,6 +33,8 @@ use crate::state::{
 use osmosis_std::types::osmosis::gamm::v1beta1::{MsgJoinPool, GammQuerier, SwapAmountInRoute, QueryPoolResponse, MsgSwapExactAmountIn};
 use osmosis_std::types::osmosis::lockup::{MsgLockTokens, MsgBeginUnlockingAll, MsgBeginUnlocking};
 use osmosis_std::types::cosmos::base::v1beta1::Coin;
+// use osmosis_testing::{Account, Module, OsmosisTestApp, Wasm, Gamm};
+
 
 // version info for migration info
 const CONTRACT_NAME: &str = "crates.io:cw20-base";
@@ -289,6 +295,21 @@ pub fn execute_white_list_update(deps: DepsMut, info: MessageInfo, coins: Vec<St
     Ok(Response::new().add_attribute("method", "update white list"))
 }
 
+fn query_pool(
+    deps: &DepsMut,
+    pool_id: u64,
+) -> StdResult<osmosis_std::types::osmosis::gamm::v1beta1::Pool> {
+    let res = GammQuerier::new(&deps.querier).pool(pool_id)?;
+    res.pool
+        .ok_or_else(|| StdError::NotFound {
+            kind: "pool".to_string(),
+        })?
+        .try_into() // convert `Any` to `osmosis_std::types::osmosis::gamm::v1beta1::Pool`
+        .map_err(|e: DecodeError| StdError::ParseErr {
+            target_type: "osmosis_std::types::osmosis::gamm::v1beta1::Pool".to_string(),
+            msg: e.to_string(),
+        })
+}
 
 pub fn execute_convert_rewards(
     env: Env,
@@ -302,40 +323,58 @@ pub fn execute_convert_rewards(
 
     let _contract_address = env.contract.address;
     let balances = deps.querier.query_all_balances(&_contract_address);
-
     if let Err(_e) = balances {
         return Err(ContractError::NoValidAddress {});
     }
 
     let balances_unwrapped = balances.unwrap();
-
     if balances_unwrapped.len() == 0 {
         return Err(ContractError::NoBalancesFound {});
     }
 
     let info = POOL_INFO.load(deps.storage)?;
-    let mut  messages = Vec::new();
+    let mut messages = Vec::new();
+
+    let pools_id = Vec::from([1]);
 
     for coin in &balances_unwrapped{
-        if (&coin.denom != &info.denom_1) || (&coin.denom != &info.denom_2 ) & info.white_list_denoms.contains(&coin.denom){ 
-            // TODO: Swap this coin to one of denom
-            let msg_: CosmosMsg = MsgSwapExactAmountIn {
-                sender: _contract_address.to_string(),
-                token_out_min_amount: "1".to_string(),
-                token_in: Some(Coin{
-                    denom: coin.denom.to_string(),
-                    amount: coin.amount.to_string()
-                }),
-                routes: Vec::from([SwapAmountInRoute{
-                    pool_id: 1,
-                    token_out_denom: "uosmo".to_string()
-                }])
-            }.into();
-            messages.push(msg_);
-            
+        if ((&coin.denom != &info.denom_1) || (&coin.denom != &info.denom_2 )) && (info.white_list_denoms.contains(&coin.denom)){ 
+            let mut swappable_denom = "".to_string();
+            let mut pool_id = 0;
+            for &id in &pools_id{
+                pool_id = id;
+                let pool = query_pool(&deps, id).unwrap();
+                let pool_asset = pool.pool_assets;
+                let denom1 = &pool_asset[0].token.as_ref().unwrap().denom;
+                let denom2 = &pool_asset[1].token.as_ref().unwrap().denom;
+                if &coin.denom == denom1{
+                    swappable_denom = denom2.to_string();
+                    break;
+                }
+                if &coin.denom == denom2{
+                    swappable_denom = denom1.to_string();
+                    break;
+                }
+            }
+            if (pool_id != 0 ) && (swappable_denom != ""){
+                let msg_: CosmosMsg = MsgSwapExactAmountIn {
+                    sender: _contract_address.to_string(),
+                    token_out_min_amount: "1".to_string(),
+                    token_in: Some(Coin{
+                        denom: coin.denom.to_string(),
+                        amount: coin.amount.to_string()
+                    }),
+                    routes: Vec::from([SwapAmountInRoute{
+                        pool_id: pool_id,
+                        token_out_denom: swappable_denom
+                    }])
+                }.into();
+                messages.push(msg_);
+            }
+           
         }
     };
-    //TODO: Collect tokens
+    //TODO: Make fee collector as a function 
 
     if state.fee != 0 {
         messages.push(
@@ -973,7 +1012,99 @@ mod tests {
     const PNG_HEADER: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
 
     mod instantiate {
+
+        use cosmwasm_std::Uint64;
+
         use super::*;
+        #[test]
+        // fn test_osmosis() {
+        //     let app = OsmosisTestApp::new();
+        //     let accs = app
+        //         .init_accounts(
+        //             &[
+        //                 cosmwasm_std::Coin::new(1_000_000_000_000, "uatom"),
+        //                 cosmwasm_std::Coin::new(1_000_000_000_000, "uosmo"),
+        //             ],
+        //             2,
+        //         )
+        //         .unwrap();
+        //     let admin = &accs[0];
+        //     let new_admin = &accs[1];
+        //     // create Gamm Module Wrapper
+        //     let gamm = Gamm::new(&app);
+
+        //     // create balancer pool with basic configuration
+        //     let pool_liquidity = vec![cosmwasm_std::Coin::new(1_000_000, "uatom"), cosmwasm_std::Coin::new(1_000, "uosmo")];    
+        //     let pool_id = gamm
+        //         .create_basic_pool(&pool_liquidity, &admin)
+        //         .unwrap()
+        //         .data
+        //         .pool_id;
+        //     // query pool and assert if the pool is created successfully
+        //     let pool = gamm.query_pool(pool_id).unwrap();
+        //     println!("{}", pool.id);
+        //     let wasm = Wasm::new(&app);
+
+        //     let wasm_byte_code = std::fs::read("./artifacts/cw20_base.wasm").unwrap();
+        //     let code_id = wasm
+        //         .store_code(&wasm_byte_code, None, admin)
+        //         .unwrap()
+        //         .data
+        //         .code_id;
+            
+        //     // instantiate contract with initial admin and make admin list mutable
+        //     let init_admins = vec![admin.address()];
+        //     let contract_addr = wasm
+        //         .instantiate(
+        //             code_id,
+        //             &InstantiateMsg {
+        //                 name: "Cash Token".to_string(),
+        //                 symbol: "CASH".to_string(),
+        //                 decimals: 9,
+        //                 id: 1, 
+        //                 denom_1: "uosmo".to_string(),
+        //                 denom_2: "atom".to_string(),
+        //                 fee_collector_address: "osmo1cyyzpxplxdzkeea7kwsydadg87357qnahakaks".to_string(),
+        //                 white_list_denoms: Vec::from(["uosmo".to_string()]),
+        //                 fee: 0,
+        //                 initial_balances: vec![Cw20Coin {
+        //                     address: String::from("osmo1cyyzpxplxdzkeea7kwsydadg87357qnahakaks"),
+        //                     amount: Uint128::new(12232)
+        //                 }],
+        //                 mint: None,
+        //                 marketing: None,
+        //             },
+        //             None, // contract admin used for migration, not the same as cw1_whitelist admin
+        //             None, // contract label
+        //             &[], // funds
+        //             admin, // signer
+        //         )
+        //         .unwrap()
+        //         .data
+        //         .address;
+            
+        //     // query contract state to check if contract instantiation works properly
+        //     let pool_info = wasm
+        //         .query::<QueryMsg, PoolInfoResponse>(&contract_addr, &&QueryMsg::PoolInfo {})
+        //         .unwrap().white_list_denoms;
+        //     println!("{}", pool_info[0]);
+        //     wasm.execute::<ExecuteMsg>(
+        //         &contract_addr,
+        //         &ExecuteMsg::UpdateWhiteList { coins: (vec!["hello".to_string()]) },
+        //         &[],
+        //         admin,
+        //     )
+        //     .unwrap();
+        //     // query contract state to check if contract instantiation works properly
+        //     let pool_info = wasm
+        //     .query::<QueryMsg, PoolInfoResponse>(&contract_addr, &&QueryMsg::PoolInfo {})
+        //     .unwrap().white_list_denoms;
+      
+        //     println!("{}", pool_info[0]);
+            
+        //     // assert_eq!(admin_list.admins, init_admins);
+        //     // assert!(admin_list.mutable);
+        // }
 
         #[test]
         fn basic() {
@@ -1538,6 +1669,7 @@ mod tests {
             amount1
         );
     }
+
 
     #[test]
     fn burn() {
