@@ -1,6 +1,3 @@
-# osmo-user-pool-sc / CW-Storage-Osmosis
-
-
 # Documentation
 
 This API document can be used in testing purposes.

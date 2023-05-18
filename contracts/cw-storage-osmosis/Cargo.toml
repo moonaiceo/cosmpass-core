@@ -1,6 +1,6 @@
 [package]
 name = "cw-storage-osmosis"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Daniel Farina <dan@osmosis.team>"]
 edition = "2018"
 
